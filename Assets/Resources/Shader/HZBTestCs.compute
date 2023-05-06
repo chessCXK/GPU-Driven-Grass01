@@ -1,0 +1,144 @@
+#pragma multi_compile_local __ _BAKEDCODE
+
+
+
+#pragma kernel HZBTest
+#pragma kernel ClearArgs
+
+#pragma kernel BakedClearArgs
+
+#pragma enable_d3d11_debug_symbols
+
+#include "Common.cginc"
+#include "HZBOclussion.cginc"
+
+#ifdef _BAKEDCODE
+RWBuffer<uint> _VisibleArgsIndexBuffer;
+#endif
+StructuredBuffer<ClusterData> _ClusterBuffer;
+StructuredBuffer<ClusterKindData> _ClusterKindBuffer;
+RWBuffer<uint> _ArgsBuffer;
+RWBuffer<uint> _ResultBuffer;
+
+float4 _FrustumPlanes[6];
+
+//x:fieldOfView, y:LODBias, z:maxmumLODLevel
+half4 _CameraData;
+//xyz:cameraPos
+half3 _CameraPos;
+
+uint _MaxSize;
+
+
+half FrustumCull(half3 center, half3 extents)
+{
+    [unroll]
+    for (uint i = 0; i < 6; i++)
+    {
+        half4 plane = _FrustumPlanes[i];
+        half3 normal = plane.xyz;
+        half dist = dot(normal, center) + plane.w;
+        half radius = dot(extents, abs(normal));
+        if (dist <= -radius)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+half GetRelativeHeight(half3 center, half maxSideSize, half3 cameraPos, half fieldOfView, half lodBias)
+{
+    half preRelative;
+    half halfAngle = tan(0.0174532924F * fieldOfView * 0.5f);
+    preRelative = 0.5f / halfAngle;
+    preRelative = preRelative * lodBias;
+
+    half dis = distance(center, cameraPos);
+    half relativeHeight = maxSideSize * preRelative / dis;
+    return relativeHeight;
+}
+
+uint CalculateLODLevel(half4 lodRelative, half3 center, half maxSideSize, half3 cameraPos, half fieldOfView, half lodBias)
+{
+    half relative = GetRelativeHeight(center, maxSideSize, cameraPos, fieldOfView, lodBias);
+
+    uint lodLevel = 4;
+
+    lodLevel -= uint(lodRelative.w < relative);
+    lodLevel -= uint(lodRelative.z < relative);
+    lodLevel -= uint(lodRelative.y < relative);
+    lodLevel -= uint(lodRelative.x < relative);
+
+    return lodLevel;
+}
+
+[numthreads(64,1,1)]
+void HZBTest(uint id : SV_DispatchThreadID)
+{
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+
+    ClusterData cData = _ClusterBuffer[id];
+    ClusterKindData cKindData = _ClusterKindBuffer[cData.clusterKindIndex];
+
+    //LOD
+    half maxExtend = max(cData.extends.x, max(cData.extends.y, cData.extends.z));
+    uint lodLevel = CalculateLODLevel(cKindData.lodRelative, cData.center, maxExtend * 2, _CameraPos, _CameraData.x, _CameraData.y);
+    if (lodLevel < _CameraData.z)
+    {
+        lodLevel = _CameraData.z;
+    }
+    if (cKindData.lodNum <= lodLevel)
+    {
+        return;
+    }
+
+    if (FrustumCull(cData.center, cData.extends) > 0.5)
+    {
+        return;
+    }
+
+    if (HizCull_4x4(cData.center, cData.extends) > 0.5)
+    {
+        return;
+    }
+    
+    //lodLevel = 1;
+    uint argsIndex = cKindData.argsIndex + lodLevel;
+    uint lodOffset = lodLevel * cKindData.elementNum;
+
+    uint currentIndex;
+
+    InterlockedAdd(_ArgsBuffer[argsIndex * 5 + 1], 1, currentIndex);
+    _ResultBuffer[cKindData.kindResultStart + lodOffset + currentIndex] = cData.clusterIndex;
+
+#ifdef _BAKEDCODE
+    _VisibleArgsIndexBuffer[argsIndex] = cData.clusterKindIndex * 100 + lodLevel + 1;
+#endif
+}
+
+[numthreads(64, 1, 1)]
+void ClearArgs(uint id : SV_DispatchThreadID)
+{
+    if(id >= _MaxSize)
+    {
+        return;
+    }
+    _ArgsBuffer[id * 5 + 1] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void BakedClearArgs(uint id : SV_DispatchThreadID)
+{
+#ifdef _BAKEDCODE
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+    _VisibleArgsIndexBuffer[id] = 0;
+#endif
+}
+

@@ -1,0 +1,23 @@
+#pragma kernel BuildHZB
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float> scrTexture;
+RWTexture2D<float> destTexture;
+float4 _depthRTSize;
+
+#pragma enable_d3d11_debug_symbols
+
+[numthreads(8,8,1)]
+void BuildHZB(uint2 id : SV_DispatchThreadID)
+{
+    if (id.x > _depthRTSize.x || id.y > _depthRTSize.y)
+    {
+        return;
+    }
+    uint2 uv = id * 2;
+    float4 deviceZ = float4(scrTexture[uv], scrTexture[uv + uint2(0, 1)], scrTexture[uv + uint2(1, 0)], scrTexture[uv + uint2(1, 1)]);
+
+    float finalDeviceZ = min(min(deviceZ.x, deviceZ.y), min(deviceZ.z, deviceZ.w));
+    destTexture[id] = finalDeviceZ;
+}
